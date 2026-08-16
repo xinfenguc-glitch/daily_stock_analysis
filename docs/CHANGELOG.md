@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 - [改进] AIHubMix 注册与引流链接统一使用 inferera.com，改善中国大陆网络直连体验。
+- [新功能] 新增 `chinatextbook` skill，覆盖 TapXWorld/ChinaTextbook 全部 7 个顶层目录（含五•四学制平行体系、大学与中考真题）的教材检索与下载，支持两种拆分件约定与 GitHub API 不可达时的内置索引回退。
 
 ## [3.30.0] - 2026-08-09
 
