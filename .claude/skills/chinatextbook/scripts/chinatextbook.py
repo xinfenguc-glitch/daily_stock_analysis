@@ -92,6 +92,18 @@ GRADE_ALIASES = {
     "7年级": "七年级", "8年级": "八年级", "9年级": "九年级",
 }
 
+# 年级别名整体正则：长优先，且 `(?!级)` 保证「七年级」不会被「七年」二次命中。
+GRADE_ALIAS_RE = re.compile(
+    "(?:" + "|".join(
+        re.escape(alias) for alias in sorted(GRADE_ALIASES, key=len, reverse=True)
+    ) + r")(?!级)"
+)
+
+# 版次：第七版 / 第7版 / 原书第6版
+EDITION_RE = re.compile(r"第\s*([一二三四五六七八九十]|\d{1,2})\s*版")
+CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+          "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
 # 紧凑写法：九上 -> 九年级 上册
 COMPACT_GRADE_RE = re.compile(r"(?<![年第])([一二三四五六七八九1-9])([上下])(?![册学期年])")
 CN_DIGIT = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五",
@@ -244,6 +256,15 @@ def base_stage(stage: str) -> str:
     return WU_SI_DIR_RE.sub("", stage).strip()
 
 
+def parse_edition(text: str) -> int | None:
+    """取出「第七版」「第7版」里的版次数字；「第六册」不算版次。"""
+    match = EDITION_RE.search(text)
+    if not match:
+        return None
+    token = match.group(1)
+    return CN_NUM.get(token) if token in CN_NUM else int(token)
+
+
 def raw_url(path: str) -> str:
     return RAW_BASE + urllib.parse.quote(path)
 
@@ -261,9 +282,12 @@ def expand_compact(text: str) -> str:
         return f"{grade}年级 {half}册 "
 
     text = COMPACT_GRADE_RE.sub(repl, text)
-    for alias, canon in GRADE_ALIASES.items():
-        if alias in text:
-            text = text.replace(alias, f"{alias} {canon} ")
+    # 单次扫描展开年级别名。逐个 str.replace 会把已展开的结果再次展开
+    # （「七年级」里的「七年」会被二次命中），这里用长优先的整体正则加
+    # `(?!级)` 守卫，保证每个位置只展开一次。
+    text = GRADE_ALIAS_RE.sub(
+        lambda match: f"{match.group(0)} {GRADE_ALIASES[match.group(0)]} ", text
+    )
     return text
 
 
@@ -373,6 +397,7 @@ class Profile:
     start_point: str | None = None
     province: str | None = None
     year: str | None = None
+    edition: int | None = None
     exam: bool = False
     materials: list[str] = field(default_factory=list)
     university: bool = False
@@ -485,6 +510,11 @@ def parse_query(query: str, stage_override: str | None = None,
     if year:
         profile.year = year.group(1)
 
+    # 版次
+    profile.edition = parse_edition(raw)
+    if profile.edition:
+        profile.notes.append(f"指定版次：第 {profile.edition} 版")
+
     # 材料类型
     for material, aliases in MATERIAL_WORDS.items():
         if any(a in raw for a in aliases):
@@ -584,8 +614,6 @@ def score_path(base: str, profile: Profile, tokens: list[str]) -> tuple[int, lis
         elif normalize(profile.subject) in normalize(subject):
             score += 300
             reasons.append(f"学科近似：{subject}")
-        elif profile.subject in UNIVERSITY_SUBJECTS and subject == profile.subject:
-            score += 300
         else:
             score -= 250
 
@@ -629,6 +657,20 @@ def score_path(base: str, profile: Profile, tokens: list[str]) -> tuple[int, lis
                 source = f"{profile.province}偏好" if profile.province else "默认偏好"
                 reasons.append(f"{source}：{pref}")
                 break
+
+    # --- 版次 ---
+    path_edition = parse_edition(base)
+    if profile.edition:
+        if path_edition == profile.edition:
+            score += 400
+            reasons.append(f"版次匹配：第{profile.edition}版")
+        elif path_edition:
+            # 近似版次不能冒充精确命中，降权但仍可作为候选展示
+            score -= 350
+            reasons.append(f"版次不符：第{path_edition}版")
+    elif path_edition:
+        # 用户未指定版次时轻微偏好新版，只用于打破并列，不压过其他信号
+        score += min(path_edition, 12) * 6
 
     # --- 记谱法 / 起点 ---
     if profile.notation:
@@ -851,23 +893,36 @@ def print_results(results: list[Result], profile: Profile, explain: bool, as_jso
 # 子命令
 # --------------------------------------------------------------------------
 
+def report_index_source(source: str, count: int, verbose: bool = False) -> None:
+    """说明索引来源。内置快照是时间点产物，必须提示可能落后于上游。"""
+    if verbose:
+        print(f"[索引] {source}（{count} 个文件）")
+    if source == "bundled-snapshot":
+        print(
+            "[提示] 当前使用技能内置索引快照，可能落后于上游仓库；"
+            "联网后加 --refresh 可拉取最新目录。",
+            file=sys.stderr,
+        )
+
+
 def cmd_search(args) -> int:
     paths, source = load_index(refresh=args.refresh, offline=args.offline)
+    report_index_source(source, len(paths), args.explain)
     results, profile = search(paths, args.query, args.limit, args.stage, args.province)
-    if args.explain:
-        print(f"[索引] {source}（{len(paths)} 个文件）")
     print_results(results, profile, args.explain, args.json)
     return 0
 
 
 def cmd_browse(args) -> int:
     paths, source = load_index(refresh=args.refresh, offline=args.offline)
+    report_index_source(source, len(paths))
     browse(paths, args.path or "", args.limit)
     return 0
 
 
 def cmd_download(args) -> int:
     paths, source = load_index(refresh=args.refresh, offline=args.offline)
+    report_index_source(source, len(paths))
     results, profile = search(paths, args.query, max(args.limit, 5), args.stage, args.province)
     if not results:
         print("没有找到候选，已中止下载。")
@@ -902,6 +957,7 @@ def cmd_download(args) -> int:
 
 def cmd_coverage(args) -> int:
     paths, source = load_index(refresh=args.refresh, offline=args.offline)
+    report_index_source(source, len(paths))
     grouped = group_parts(paths)
     stages: dict[str, dict[str, int]] = {}
     for base in grouped:
@@ -948,6 +1004,18 @@ def cmd_self_test(args) -> int:
     # 紧凑写法
     check("九上展开", "九年级" in expand_compact("九上英语") and "上册" in expand_compact("九上英语"),
           expand_compact("九上英语"))
+    # 回归：别名展开必须单次，「七年级」不应被「七年」二次命中成「七年 七年级 级」
+    check("别名不二次展开", "级 级" not in expand_compact("七年级 数学"),
+          expand_compact("七年级 数学"))
+    check("初一仍可展开", "七年级" in expand_compact("初一 数学"), expand_compact("初一 数学"))
+
+    # 版次解析
+    check("版次-中文", parse_edition("同济大学高等数学第七版") == 7)
+    check("版次-数字", parse_edition("高等数学 第7版 上册") == 7)
+    check("版次-原书", parse_edition("离散数学及其应用（原书第6版）") == 6)
+    check("册非版次", parse_edition("高等数学 第六册 上册") is None,
+          str(parse_edition("高等数学 第六册 上册")))
+    check("解析指定版次", parse_query("大学 高数 同济 第七版").edition == 7)
 
     # 查询解析
     p = parse_query("江苏 九上 译林 英语")
